@@ -10,7 +10,6 @@ OWNER_ID = 6663845789  # Owner ID
 LOG_GROUP_ID = -1002035333875
 PINTEREST_API_URL = "https://api.pinterest.com/v1/pins/"  # Example Pinterest API endpoint
 
-# In-memory leaderboard (Dictionary with user IDs as keys and scores as values)
 leaderboard = {}
 
 # Enable logging
