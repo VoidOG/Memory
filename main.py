@@ -1,138 +1,168 @@
+import logging
 import random
 import requests
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, CallbackContext, CallbackQueryHandler, Filters
+from telegram import Update, ParseMode
+from telegram.ext import Updater, CommandHandler, CallbackContext
+from telegram.error import TelegramError, BadRequest
 
 # Global variables
-sequence = []
-user_attempts = {}
-global_leaderboard = {}
-group_leaderboards = {}
-current_mode = "easy"  #default game mode hai
-game_in_progress = False
+OWNER_ID = 6663845789  # Owner ID
+LOG_GROUP_ID = -1002035333875
+PINTEREST_API_URL = "https://api.pinterest.com/v1/pins/"  # Example Pinterest API endpoint
 
-OWNER_ID = 6663845789 
+# In-memory leaderboard (Dictionary with user IDs as keys and scores as values)
+leaderboard = {}
 
-game_modes = {
-    "easy": {"pics": 4, "timer": 3},
-    "medium": {"pics": 6, "timer": 4},
-    "hard": {"pics": 8, "timer": 4},
-}
+# Enable logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-def get_random_images_from_pinterest(search_query, num_images=5):
-    url = f"https://www.pinterest.com/search/pins/?q={search_query}"
-    response = requests.get(url)
-    soup = BeautifulSoup(response.text, 'html.parser')
+# Function to fetch a random Pinterest image
+def get_random_pinterest_image():
+    try:
+        random_id = random.randint(1, 1000)  # Simulate fetching random images
+        response = requests.get(f"{PINTEREST_API_URL}{random_id}")
+        if response.status_code == 200:
+            # Here we assume the response returns an image URL
+            return response.json().get('url')
+        return None
+    except requests.RequestException as e:
+        logger.error(f"Failed to fetch Pinterest image: {e}")
+        return None
+
+# Function to format user details
+def format_user_details(user, chat=None):
+    username = f"@{user.username}" if user.username else "No username"
+    profile_link = f"[Profile Link](tg://user?id={user.id})"
+    name = user.full_name
+    user_details = f" *Name*: {name}\n"
+    user_details += f" *Username*: {username}\n"
+    user_details += f" *User ID*: {user.id}\n"
+    user_details += f" *Profile*: {profile_link}\n"
+
+    if chat:
+        if chat.type == "private":
+            user_details += "💬 *Chat Type*: Private (DM)\n"
+        else:
+            chat_name = chat.title
+            chat_link = f" [Group Link](https://t.me/{chat.username})" if chat.username else "No public link"
+            user_details += f" *Group*: {chat_name}\n{chat_link}\n"
     
-    images = []
-    for img_tag in soup.find_all('img', limit=num_images):
-        img_url = img_tag['src']
-        images.append(img_url)
-    return images
+    return user_details
 
+# Function to log user who started the bot
+def log_user_start(update: Update, context: CallbackContext):
+    user = update.message.from_user
+    chat = update.message.chat
+
+    # Format user details
+    user_details = format_user_details(user, chat)
+    log_message = f" *Bot Started by:*\n{user_details}"
+
+    # Send log to the log group
+    context.bot.send_message(
+        chat_id=LOG_GROUP_ID,
+        text=log_message,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+# Error handler to log exceptions
+def error_handler(update: Update, context: CallbackContext) -> None:
+    """Log the error and send a friendly message to the log group."""
+    logger.error(msg="Exception while handling an update:", exc_info=context.error)
+    
+    if update and update.message:
+        user = update.message.from_user
+        chat = update.message.chat
+        error_details = format_user_details(user, chat)
+        error_message = f" *Error occurred:*\n{error_details}\n\nException: `{context.error}`"
+        
+        # Send the error log to the log group
+        context.bot.send_message(
+            chat_id=LOG_GROUP_ID,
+            text=error_message,
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+# Start command
 def start(update: Update, context: CallbackContext) -> None:
     chat_id = update.message.chat_id
     context.bot.send_message(chat_id=chat_id, text="Welcome to the Memory Game bot!")
-    show_mode_buttons(update, context)
+    
+    # Log user details when they start the bot
+    log_user_start(update, context)
 
+# Help command
 def help_command(update: Update, context: CallbackContext) -> None:
-    chat_id = update.message.chat_id
     help_text = (
-        " *Memory Game Bot* \n\n"
+        " *Game Bot*\n\n"
         "Commands:\n"
         "/start - Start the bot\n"
-        "/leaderboard - Show the leaderboard\n"
-        "/mode - Change game mode (Admin only)\n"
         "/game - Start a new game\n"
-        "/restart - Restart the current game\n"
-        "To win the game, you must guess the correct sequence of images!"
+        "/mode - Change the game mode\n"
+        "/leaderboard - Show the leaderboard\n"
+        "/restart - Restart the current game"
     )
-    context.bot.send_message(chat_id=chat_id, text=help_text, parse_mode="Markdown")
+    update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
+# Broadcast command (only accessible by the owner)
 def broadcast(update: Update, context: CallbackContext) -> None:
-    if update.message.from_user.id != OWNER_ID:
-        context.bot.send_message(chat_id=update.message.chat_id, text="You are not authorized to use this command.")
-        return
-
-    if len(context.args) < 1:
-        context.bot.send_message(chat_id=update.message.chat_id, text="Usage: /broadcast <message>")
-        return
-
-    message = " ".join(context.args)
-    for chat_id in global_leaderboard.keys():
-        context.bot.send_message(chat_id=chat_id, text=message)
-
-def mode(update: Update, context: CallbackContext) -> None:
-    user_id = update.message.from_user.id
-    chat_id = update.message.chat_id
-    user_status = context.bot.get_chat_member(chat_id, user_id).status
-
-    if user_status in ['administrator', 'creator']:
-        show_mode_buttons(update, context)
+    if update.message.from_user.id == OWNER_ID:
+        message = " ".join(context.args)
+        for chat_id in get_all_users():  # Assuming get_all_users fetches all chat IDs
+            context.bot.send_message(chat_id=chat_id, text=message)
     else:
-        context.bot.send_message(chat_id=chat_id, text="Only admins can change the game mode.")
+        update.message.reply_text("You don't have permission to use this command.")
 
-def show_mode_buttons(update: Update, context: CallbackContext) -> None:
-    buttons = [
-        [InlineKeyboardButton("Easy", callback_data="easy"), InlineKeyboardButton("Medium", callback_data="medium")],
-        [InlineKeyboardButton("Hard", callback_data="hard")]
-    ]
-    reply_markup = InlineKeyboardMarkup(buttons)
-    context.bot.send_message(chat_id=update.message.chat_id, text="Select a game mode:", reply_markup=reply_markup)
-
-def mode_callback(update: Update, context: CallbackContext) -> None:
-    global current_mode
-    query = update.callback_query
-    current_mode = query.data
-    query.answer(f"Selected mode: {current_mode.capitalize()}")
-    query.message.edit_text(f"Game mode changed to {current_mode.capitalize()}.")
-
+# Game start command
 def game(update: Update, context: CallbackContext) -> None:
-    global game_in_progress
-    if game_in_progress:
-        context.bot.send_message(chat_id=update.message.chat_id, text="A game is already in progress!")
+    image_url = get_random_pinterest_image()
+    if image_url:
+        update.message.reply_photo(photo=image_url, caption="Can you remember the sequence?")
     else:
-        start_game(update, context)
+        update.message.reply_text("Failed to fetch a random Pinterest image. Try again later.")
 
-def start_game(update: Update, context: CallbackContext) -> None:
-    global game_in_progress, sequence
-    game_in_progress = True
+# Restart game command
+def restart(update: Update, context: CallbackContext) -> None:
+    update.message.reply_text("Game restarted! Start a new one with /game.")
 
-    num_pics = game_modes[current_mode]["pics"]
-    sequence = get_random_images_from_pinterest("nature", num_pics)
-    
-    context.bot.send_message(chat_id=update.message.chat_id, text=f"Starting a new game in {current_mode} mode!")
-    
-    for img in sequence:
-        context.bot.send_photo(chat_id=update.message.chat_id, photo=img)
-
-    context.job_queue.run_once(show_sequence, game_modes[current_mode]["timer"], context=update.message.chat_id)
-
-def show_sequence(context: CallbackContext) -> None:
-    context.bot.send_message(chat_id=context.job.context, text="Time's up! Now send the correct sequence of image numbers (e.g., 1 3 2 4).")
-
-def restart_game(update: Update, context: CallbackContext) -> None:
-    global game_in_progress, sequence
-    chat_id = update.message.chat_id
-
-    if game_in_progress:
-        game_in_progress = False
-        sequence = []
-        context.bot.send_message(chat_id=chat_id, text="Game has been restarted! You can start a new game using /game.")
+# Leaderboard command
+def leaderboard_command(update: Update, context: CallbackContext) -> None:
+    # Sort the leaderboard by score and display the top 10 players
+    sorted_leaderboard = sorted(leaderboard.items(), key=lambda x: x[1], reverse=True)[:10]
+    if sorted_leaderboard:
+        leaderboard_text = " *Top 10 Players:*\n\n"
+        for i, (user_id, score) in enumerate(sorted_leaderboard, start=1):
+            user = context.bot.get_chat(user_id)
+            leaderboard_text += f"{i}. {user.full_name} - {score} points\n"
+        update.message.reply_text(leaderboard_text, parse_mode=ParseMode.MARKDOWN)
     else:
-        context.bot.send_message(chat_id=chat_id, text="No game is currently in progress. Start a new game with /game.")
+        update.message.reply_text("No players in the leaderboard yet.")
 
+# Update the score for a user (dummy function, should be called when the user wins the game)
+def update_leaderboard(user_id, score):
+    if user_id in leaderboard:
+        leaderboard[user_id] += score
+    else:
+        leaderboard[user_id] = score
+
+# Main function
 def main():
     updater = Updater("7814682859:AAESP76mUBBLgjBkJNCKQNZpZXHjysoHs2g", use_context=True)
     dp = updater.dispatcher
 
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("help", help_command))
-    dp.add_handler(CommandHandler("broadcast", broadcast, Filters.user(user_id=OWNER_ID)))
-    dp.add_handler(CommandHandler("mode", mode))
+    dp.add_handler(CommandHandler("broadcast", broadcast))
     dp.add_handler(CommandHandler("game", game))
-    dp.add_handler(CommandHandler("restart", restart_game))
-    dp.add_handler(CallbackQueryHandler(mode_callback))
+    dp.add_handler(CommandHandler("restart", restart))
+    dp.add_handler(CommandHandler("leaderboard", leaderboard_command))
+
+    # Log all errors
+    dp.add_error_handler(error_handler)
 
     updater.start_polling()
     updater.idle()
