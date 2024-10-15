@@ -1,9 +1,10 @@
 import logging
 import random
 import requests
-from telegram import Update, ParseMode
+from telegram import Update
 from telegram.ext import Updater, CommandHandler, CallbackContext
 from telegram.error import TelegramError, BadRequest
+from telegram import ParseMode
 
 # Global variables
 OWNER_ID = 6663845789  # Owner ID
